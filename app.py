@@ -238,11 +238,11 @@ with st.sidebar:
     st.markdown("---")
     
     # Lien vers la documentation
-    st.markdown("""
-    📚 [Documentation complète](https://github.com/votre-repo)
+    #st.markdown("""
+    #📚 [Documentation complète](https://github.com/votre-repo)
     
-    🐛 [Signaler un bug](https://github.com/votre-repo/issues)
-    """)
+    #🐛 [Signaler un bug](https://github.com/votre-repo/issues)
+    #""")
 
 
 # ============================================================================
