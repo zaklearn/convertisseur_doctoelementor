@@ -2,10 +2,10 @@
 """
 word_to_elementor.py
 
-Convertit un document .docx structurÃ© en JSON importable par Elementor.
-Utilise l'API Google Gemini pour l'analyse sÃ©mantique du contenu.
+Convertit un document .docx structuré en JSON importable par Elementor.
+Utilise l'API Google Gemini pour l'analyse sémantique du contenu.
 
-Version: 3.0.2
+Version: 3.0.2 - FIXED
 """
 
 import argparse
@@ -29,7 +29,7 @@ from PIL import Image
 
 
 # ============================================================================
-# LAYOUTS FALLBACK - Configuration embarquÃ©e
+# LAYOUTS FALLBACK - Configuration embarquée
 # ============================================================================
 
 FALLBACK_LAYOUTS = {
@@ -38,21 +38,21 @@ FALLBACK_LAYOUTS = {
         "columns": [{"size": 100, "content_type": "main"}]
     },
     "two_columns_equal": {
-        "name": "Deux colonnes Ã©gales",
+        "name": "Deux colonnes égales",
         "columns": [
             {"size": 50, "content_type": "main"},
             {"size": 50, "content_type": "main"}
         ]
     },
     "two_columns_sidebar_left": {
-        "name": "Sidebar Ã  gauche",
+        "name": "Sidebar à gauche",
         "columns": [
             {"size": 33.33, "content_type": "sidebar"},
             {"size": 66.66, "content_type": "main"}
         ]
     },
     "two_columns_sidebar_right": {
-        "name": "Sidebar Ã  droite",
+        "name": "Sidebar à droite",
         "columns": [
             {"size": 66.66, "content_type": "main"},
             {"size": 33.33, "content_type": "sidebar"}
@@ -120,7 +120,7 @@ def fallback_distribute_auto(elements, columns_config):
 
 
 def fallback_distribute(elements, columns_config, strategy="auto"):
-    """Distribution avec stratÃ©gies"""
+    """Distribution avec stratégies"""
     num_columns = len(columns_config)
     distributed = [[] for _ in range(num_columns)]
     
@@ -168,14 +168,14 @@ def fallback_distribute(elements, columns_config, strategy="auto"):
 # ============================================================================
 
 def load_api_key() -> str:
-    """Charge la clÃ© API Google Gemini depuis le fichier .env"""
+    """Charge la clé API Google Gemini depuis le fichier .env"""
     load_dotenv()
     api_key = os.getenv('GOOGLE_API_KEY')
     
     if not api_key:
         raise ValueError(
-            "ClÃ© API Google non trouvÃ©e. "
-            "Veuillez crÃ©er un fichier .env avec GOOGLE_API_KEY=votre_clÃ©"
+            "Clé API Google non trouvée. "
+            "Veuillez créer un fichier .env avec GOOGLE_API_KEY=votre_clé"
         )
     
     return api_key
@@ -201,11 +201,11 @@ def configure_gemini(api_key: str) -> genai.GenerativeModel:
 
 
 # ============================================================================
-# PARSING DU DOCUMENT
+# PARSING DU DOCUMENT - CORRIGÉ
 # ============================================================================
 
 def extract_image_data(image_part) -> Dict[str, Any]:
-    """Extrait les donnÃ©es d'une image"""
+    """Extrait les données d'une image"""
     try:
         image_bytes = image_part.blob
         image = Image.open(BytesIO(image_bytes))
@@ -227,7 +227,7 @@ def extract_image_data(image_part) -> Dict[str, Any]:
 
 
 def parse_document(docx_path: str) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Parse le document .docx"""
+    """Parse le document .docx - VERSION CORRIGÉE"""
     if not os.path.exists(docx_path):
         raise FileNotFoundError(f"Le fichier '{docx_path}' n'existe pas")
     
@@ -244,54 +244,83 @@ def parse_document(docx_path: str) -> tuple[List[Dict[str, Any]], Dict[str, Any]
         if isinstance(element, CT_P):
             paragraph = Paragraph(element, doc)
             
+            # CORRECTION : Vérifier d'abord s'il y a une image dans ce paragraphe
+            has_image = False
             if paragraph._element.xpath('.//pic:pic'):
+                # Parcourir les runs pour trouver l'image
                 for run in paragraph.runs:
-                    # ✅ CORRECTION : Extraire les blips (images) spécifiques du run
-                    blips = run._element.xpath('.//a:blip')
-                    
-                    for blip in blips:
-                        # Obtenir le rId spécifique de cette image via l'attribut r:embed
-                        embed_attr = blip.get(
-                            '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed'
-                        )
+                    if 'graphic' in run._element.xml:
+                        # Extraire le rId de l'image depuis le XML
+                        import xml.etree.ElementTree as ET
+                        try:
+                            # Parser le XML du run pour trouver le rId
+                            root = ET.fromstring(run._element.xml)
+                            # Chercher l'attribut r:embed ou r:link
+                            for elem in root.iter():
+                                for attr_name, attr_value in elem.attrib.items():
+                                    if 'embed' in attr_name or 'link' in attr_name:
+                                        # Trouver la relation correspondante
+                                        if attr_value in doc.part.rels:
+                                            rel = doc.part.rels[attr_value]
+                                            if "image" in rel.target_ref:
+                                                image_ref_id = f"__IMAGE_{image_counter}__"
+                                                img_data = extract_image_data(rel.target_part)
+                                                
+                                                if img_data:
+                                                    image_data[image_ref_id] = img_data
+                                                    raw_structure.append({
+                                                        'type': 'image',
+                                                        'ref_id': image_ref_id
+                                                    })
+                                                    image_counter += 1
+                                                    has_image = True
+                                                    break
+                                if has_image:
+                                    break
+                        except:
+                            # Fallback : méthode alternative si le parsing XML échoue
+                            # Extraire toutes les images de ce paragraphe
+                            for rel_id, rel in doc.part.rels.items():
+                                if "image" in rel.target_ref:
+                                    # Vérifier si cette image est référencée dans ce paragraphe
+                                    if rel_id in run._element.xml:
+                                        image_ref_id = f"__IMAGE_{image_counter}__"
+                                        img_data = extract_image_data(rel.target_part)
+                                        
+                                        if img_data:
+                                            image_data[image_ref_id] = img_data
+                                            raw_structure.append({
+                                                'type': 'image',
+                                                'ref_id': image_ref_id
+                                            })
+                                            image_counter += 1
+                                            has_image = True
+                                            break
                         
-                        if embed_attr and embed_attr in doc.part.rels:
-                            # Utiliser la relation SPÉCIFIQUE à cette image
-                            rel = doc.part.rels[embed_attr]
-                            
-                            image_ref_id = f"__IMAGE_{image_counter}__"
-                            img_data = extract_image_data(rel.target_part)
-                            
-                            if img_data:
-                                image_data[image_ref_id] = img_data
-                                raw_structure.append({
-                                    'type': 'image',
-                                    'ref_id': image_ref_id
-                                })
-                                image_counter += 1
+                        if has_image:
+                            break
             
+            # Traiter le texte seulement s'il n'y a pas d'image ou s'il y a du texte en plus
             text = paragraph.text.strip()
-            if not text:
-                continue
-            
-            style_name = paragraph.style.name if paragraph.style else 'Normal'
-            
-            if 'Heading 1' in style_name or 'Title' in style_name:
-                elem_type = 'style_h1'
-            elif 'Heading 2' in style_name:
-                elem_type = 'style_h2'
-            elif 'Heading 3' in style_name:
-                elem_type = 'style_h3'
-            elif 'Heading 4' in style_name:
-                elem_type = 'style_h4'
-            else:
-                elem_type = 'paragraph'
-            
-            raw_structure.append({
-                'type': elem_type,
-                'content': text,
-                'original_style': style_name
-            })
+            if text and not has_image:  # Ne pas ajouter le texte si c'est un paragraphe avec image
+                style_name = paragraph.style.name if paragraph.style else 'Normal'
+                
+                if 'Heading 1' in style_name or 'Title' in style_name:
+                    elem_type = 'style_h1'
+                elif 'Heading 2' in style_name:
+                    elem_type = 'style_h2'
+                elif 'Heading 3' in style_name:
+                    elem_type = 'style_h3'
+                elif 'Heading 4' in style_name:
+                    elem_type = 'style_h4'
+                else:
+                    elem_type = 'paragraph'
+                
+                raw_structure.append({
+                    'type': elem_type,
+                    'content': text,
+                    'original_style': style_name
+                })
     
     if not raw_structure:
         raise ValueError("Le document ne contient aucun contenu exploitable")
@@ -300,7 +329,7 @@ def parse_document(docx_path: str) -> tuple[List[Dict[str, Any]], Dict[str, Any]
 
 
 # ============================================================================
-# ANALYSE SÃ‰MANTIQUE AVEC GEMINI
+# ANALYSE SÉMANTIQUE AVEC GEMINI
 # ============================================================================
 
 def build_gemini_prompt(raw_structure: List[Dict[str, Any]]) -> str:
@@ -319,7 +348,7 @@ def build_gemini_prompt(raw_structure: List[Dict[str, Any]]) -> str:
     
     prompt = f"""Analyse ce document et retourne UNIQUEMENT un tableau JSON.
 
-RÃˆGLES STRICTES:
+RÈGLES STRICTES:
 1. Types: h1, h2, h3, h4, p, image
 2. Premier titre = h1
 3. Images: utilise les IDs fournis
@@ -345,26 +374,26 @@ def get_semantic_structure(
     for attempt in range(max_retries):
         try:
             if attempt > 0:
-                print(f"ðŸ”„ Tentative {attempt + 1}/{max_retries}...", file=sys.stderr)
+                print(f"🔄 Tentative {attempt + 1}/{max_retries}...", file=sys.stderr)
             else:
-                print("ðŸ“¡ Envoi de la requÃªte Ã  l'API Gemini...", file=sys.stderr)
+                print("📡 Envoi de la requête à l'API Gemini...", file=sys.stderr)
             
             response = model.generate_content(prompt)
             
             if hasattr(response, 'candidates') and response.candidates:
                 finish_reason = response.candidates[0].finish_reason
                 if finish_reason == 2:
-                    print("âš ï¸  RÃ©ponse bloquÃ©e par les filtres de sÃ©curitÃ©, retry...", file=sys.stderr)
+                    print("⚠️  Réponse bloquée par les filtres de sécurité, retry...", file=sys.stderr)
                     continue
                 elif finish_reason == 3:
-                    print("âš ï¸  RÃ©ponse tronquÃ©e, retry...", file=sys.stderr)
+                    print("⚠️  Réponse tronquée, retry...", file=sys.stderr)
                     if len(raw_structure) > 20:
-                        print("ðŸ“Š Document trop long, traitement par sections...", file=sys.stderr)
+                        print("📊 Document trop long, traitement par sections...", file=sys.stderr)
                         return process_long_document(raw_structure, model)
                     continue
             
             if not response or not response.text:
-                print("âš ï¸  Pas de rÃ©ponse texte, retry...", file=sys.stderr)
+                print("⚠️  Pas de réponse texte, retry...", file=sys.stderr)
                 continue
             
             response_text = response.text.strip()
@@ -373,42 +402,42 @@ def get_semantic_structure(
             response_text = re.sub(r'\s*```$', '', response_text)
             response_text = response_text.strip()
             
-            print("âœ… RÃ©ponse reÃ§ue de Gemini", file=sys.stderr)
+            print("✅ Réponse reçue de Gemini", file=sys.stderr)
             
             try:
                 semantic_structure = json.loads(response_text)
             except json.JSONDecodeError as e:
-                print(f"âŒ Erreur de parsing JSON: {e}", file=sys.stderr)
+                print(f"❌ Erreur de parsing JSON: {e}", file=sys.stderr)
                 if attempt < max_retries - 1:
-                    print(f"ðŸ”„ Nouvelle tentative...", file=sys.stderr)
+                    print(f"🔄 Nouvelle tentative...", file=sys.stderr)
                     continue
                 else:
-                    print(f"RÃ©ponse brute de l'IA:\n{response_text[:500]}...", file=sys.stderr)
-                    raise Exception(f"JSON invalide aprÃ¨s {max_retries} tentatives: {e}")
+                    print(f"Réponse brute de l'IA:\n{response_text[:500]}...", file=sys.stderr)
+                    raise Exception(f"JSON invalide après {max_retries} tentatives: {e}")
             
             if not isinstance(semantic_structure, list):
-                raise Exception("La structure sÃ©mantique doit Ãªtre une liste")
+                raise Exception("La structure sémantique doit être une liste")
             
             for item in semantic_structure:
                 if not isinstance(item, dict):
-                    raise Exception("Chaque Ã©lÃ©ment doit Ãªtre un dictionnaire")
+                    raise Exception("Chaque élément doit être un dictionnaire")
                 if 'type' not in item:
-                    raise Exception("Chaque Ã©lÃ©ment doit avoir un 'type'")
+                    raise Exception("Chaque élément doit avoir un 'type'")
                 if item['type'] != 'image' and 'content' not in item:
-                    raise Exception(f"Les Ã©lÃ©ments de type '{item['type']}' doivent avoir un 'content'")
+                    raise Exception(f"Les éléments de type '{item['type']}' doivent avoir un 'content'")
             
-            print(f"âœ… Structure sÃ©mantique validÃ©e: {len(semantic_structure)} Ã©lÃ©ments", file=sys.stderr)
+            print(f"✅ Structure sémantique validée: {len(semantic_structure)} éléments", file=sys.stderr)
             return semantic_structure
             
         except Exception as e:
             if attempt < max_retries - 1:
-                print(f"âš ï¸  Erreur: {e}", file=sys.stderr)
-                print(f"ðŸ”„ Nouvelle tentative...", file=sys.stderr)
+                print(f"⚠️  Erreur: {e}", file=sys.stderr)
+                print(f"🔄 Nouvelle tentative...", file=sys.stderr)
                 continue
             else:
-                raise Exception(f"Erreur aprÃ¨s {max_retries} tentatives: {e}")
+                raise Exception(f"Erreur après {max_retries} tentatives: {e}")
     
-    raise Exception("Impossible d'obtenir une rÃ©ponse valide de l'API Gemini")
+    raise Exception("Impossible d'obtenir une réponse valide de l'API Gemini")
 
 
 def process_long_document(
@@ -416,7 +445,7 @@ def process_long_document(
     model: genai.GenerativeModel
 ) -> List[Dict[str, Any]]:
     """Traite un document long en sections"""
-    print("ðŸ“„ Traitement du document en sections...", file=sys.stderr)
+    print("🔄 Traitement du document en sections...", file=sys.stderr)
     
     chunk_size = 15
     chunks = [raw_structure[i:i + chunk_size] for i in range(0, len(raw_structure), chunk_size)]
@@ -424,7 +453,7 @@ def process_long_document(
     all_results = []
     
     for idx, chunk in enumerate(chunks):
-        print(f"ðŸ“Š Traitement section {idx + 1}/{len(chunks)}...", file=sys.stderr)
+        print(f"📊 Traitement section {idx + 1}/{len(chunks)}...", file=sys.stderr)
         prompt = build_gemini_prompt(chunk)
         
         try:
@@ -439,26 +468,26 @@ def process_long_document(
                 chunk_result = json.loads(response_text)
                 all_results.extend(chunk_result)
         except Exception as e:
-            print(f"âš ï¸  Erreur section {idx + 1}: {e}", file=sys.stderr)
+            print(f"⚠️  Erreur section {idx + 1}: {e}", file=sys.stderr)
             continue
     
-    print(f"âœ… Document complet traitÃ©: {len(all_results)} Ã©lÃ©ments", file=sys.stderr)
+    print(f"✅ Document complet traité: {len(all_results)} éléments", file=sys.stderr)
     return all_results
 
 
 # ============================================================================
-# GÃ‰NÃ‰RATION DES WIDGETS ELEMENTOR
+# GÉNÉRATION DES WIDGETS ELEMENTOR
 # ============================================================================
 
 def generate_unique_id() -> str:
-    """GÃ©nÃ¨re un ID unique pour les Ã©lÃ©ments Elementor"""
+    """Génère un ID unique pour les éléments Elementor"""
     import random
     import string
     return ''.join(random.choices(string.ascii_lowercase + string.digits, k=7))
 
 
 def create_heading_widget(content: str, tag: str) -> Dict[str, Any]:
-    """CrÃ©e un widget heading Elementor"""
+    """Crée un widget heading Elementor"""
     return {
         "id": generate_unique_id(),
         "elType": "widget",
@@ -472,7 +501,7 @@ def create_heading_widget(content: str, tag: str) -> Dict[str, Any]:
 
 
 def create_text_editor_widget(content: str) -> Dict[str, Any]:
-    """CrÃ©e un widget text-editor Elementor"""
+    """Crée un widget text-editor Elementor"""
     return {
         "id": generate_unique_id(),
         "elType": "widget",
@@ -485,7 +514,7 @@ def create_text_editor_widget(content: str) -> Dict[str, Any]:
 
 
 def create_image_widget(ref_id: str, image_info: Optional[Dict] = None) -> Dict[str, Any]:
-    """CrÃ©e un widget image Elementor"""
+    """Crée un widget image Elementor"""
     image_url = "https://example.com/placeholder.jpg"
     
     widget = {
@@ -526,7 +555,7 @@ def build_elementor_json(
         columns_config = layout_config["columns"]
         use_fallback = False
     except ImportError:
-        print("ðŸ’¡ Utilisation de la configuration de layout embarquÃ©e", file=sys.stderr)
+        print("💡 Utilisation de la configuration de layout embarquée", file=sys.stderr)
         layout_config = FALLBACK_LAYOUTS.get(layout_type, FALLBACK_LAYOUTS["single_column"])
         columns_config = layout_config["columns"]
         use_fallback = True
@@ -546,7 +575,7 @@ def build_elementor_json(
                     distribution_strategy
                 )
         except Exception as e:
-            print(f"âš ï¸  Erreur de distribution: {e}, fallback", file=sys.stderr)
+            print(f"⚠️  Erreur de distribution: {e}, fallback", file=sys.stderr)
             distributed_elements = [semantic_structure] + [[] for _ in range(len(columns_config) - 1)]
     else:
         distributed_elements = [semantic_structure]
@@ -582,7 +611,7 @@ def build_elementor_json(
                 column["elements"].append(widget)
             
             else:
-                print(f"âš ï¸  Type non reconnu ignorÃ©: {item_type}", file=sys.stderr)
+                print(f"⚠️  Type non reconnu ignoré: {item_type}", file=sys.stderr)
         
         elementor_columns.append(column)
     
@@ -616,7 +645,7 @@ def main():
     parser.add_argument(
         'docx_file',
         type=str,
-        help='Chemin vers le fichier .docx Ã  convertir'
+        help='Chemin vers le fichier .docx à convertir'
     )
     
     parser.add_argument(
@@ -629,7 +658,7 @@ def main():
     parser.add_argument(
         '-v', '--verbose',
         action='store_true',
-        help='Mode verbeux (affiche les Ã©tapes)'
+        help='Mode verbeux (affiche les étapes)'
     )
     
     parser.add_argument(
@@ -652,34 +681,34 @@ def main():
         type=str,
         default='auto',
         choices=['auto', 'sequential', 'alternating', 'balanced'],
-        help='StratÃ©gie de distribution du contenu'
+        help='Stratégie de distribution du contenu'
     )
     
     args = parser.parse_args()
     
     try:
         if args.verbose:
-            print("ðŸ”§ Initialisation...", file=sys.stderr)
+            print("🔧 Initialisation...", file=sys.stderr)
         
         api_key = load_api_key()
         model = configure_gemini(api_key)
         
         if args.verbose:
-            print(f"ðŸ“„ Parsing du document '{args.docx_file}'...", file=sys.stderr)
+            print(f"📄 Parsing du document '{args.docx_file}'...", file=sys.stderr)
         
         raw_structure, image_data = parse_document(args.docx_file)
         
         if args.verbose:
-            print(f"   â†’ {len(raw_structure)} Ã©lÃ©ments extraits", file=sys.stderr)
-            print(f"   â†’ {len(image_data)} images trouvÃ©es", file=sys.stderr)
+            print(f"   → {len(raw_structure)} éléments extraits", file=sys.stderr)
+            print(f"   → {len(image_data)} images trouvées", file=sys.stderr)
         
         if args.verbose:
-            print("ðŸ¤– Analyse sÃ©mantique avec Gemini...", file=sys.stderr)
+            print("🤖 Analyse sémantique avec Gemini...", file=sys.stderr)
         
         semantic_structure = get_semantic_structure(raw_structure, model)
         
         if args.verbose:
-            print("ðŸ—ï¸  Construction du JSON Elementor...", file=sys.stderr)
+            print("🗏 Construction du JSON Elementor...", file=sys.stderr)
             print(f"   Layout: {args.layout}", file=sys.stderr)
             print(f"   Distribution: {args.distribution}", file=sys.stderr)
         
@@ -691,7 +720,7 @@ def main():
         )
         
         if args.verbose:
-            print("âœ¨ Finalisation...", file=sys.stderr)
+            print("✨ Finalisation...", file=sys.stderr)
         
         json_output = json.dumps(elementor_json, ensure_ascii=False, indent=2)
         
@@ -699,25 +728,25 @@ def main():
             with open(args.output, 'w', encoding='utf-8') as f:
                 f.write(json_output)
             if args.verbose:
-                print(f"âœ… JSON sauvegardÃ© dans '{args.output}'", file=sys.stderr)
+                print(f"✅ JSON sauvegardé dans '{args.output}'", file=sys.stderr)
         else:
             print(json_output)
         
         if args.verbose:
-            print("âœ… Conversion terminÃ©e avec succÃ¨s!", file=sys.stderr)
+            print("✅ Conversion terminée avec succès!", file=sys.stderr)
         
         return 0
         
     except FileNotFoundError as e:
-        print(f"âŒ Erreur: {e}", file=sys.stderr)
+        print(f"❌ Erreur: {e}", file=sys.stderr)
         return 1
         
     except ValueError as e:
-        print(f"âŒ Erreur de configuration: {e}", file=sys.stderr)
+        print(f"❌ Erreur de configuration: {e}", file=sys.stderr)
         return 1
         
     except Exception as e:
-        print(f"âŒ Erreur inattendue: {e}", file=sys.stderr)
+        print(f"❌ Erreur inattendue: {e}", file=sys.stderr)
         if args.verbose:
             import traceback
             traceback.print_exc(file=sys.stderr)
