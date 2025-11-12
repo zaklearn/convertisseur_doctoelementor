@@ -1,472 +1,243 @@
 #!/usr/bin/env python3
 """
-app.py - Interface Streamlit pour Word to Elementor Converter
-VERSION CORRIGÉE - Conserve la position exacte des images
-
-Application web conviviale pour convertir des documents Word en JSON Elementor
-avec extraction directe et préservation de l'ordre des éléments.
-
-Version: 3.4 FIXED
+app_optimized.py - Application Streamlit optimisée
 """
 
 import streamlit as st
 import json
 import os
-import sys
-from io import BytesIO
-from pathlib import Path
 import tempfile
-import shutil 
-import zipfile 
-import io
-import base64
-from PIL import Image
+import shutil
+import zipfile
+from pathlib import Path
+from io import BytesIO
 from datetime import datetime
 
-# Module d'extraction corrigé intégré
-from docx import Document
-from docx.oxml.text.paragraph import CT_P
-from docx.text.paragraph import Paragraph
+from word_processor import extract_document_structure, save_images
+from json_builder import build_elementor_json
 
-
-# ============================================================================
-# FONCTION D'EXTRACTION CORRIGÉE - Conserve la position des images
-# ============================================================================
-
-def parse_document_fixed(docx_path: str) -> tuple:
-    """
-    Parse le document .docx en conservant l'ordre exact des éléments
-    VERSION CORRIGÉE
-    """
-    if not os.path.exists(docx_path):
-        raise FileNotFoundError(f"Le fichier '{docx_path}' n'existe pas")
-    
-    try:
-        doc = Document(docx_path)
-    except Exception as e:
-        raise Exception(f"Impossible de lire le fichier .docx: {e}")
-    
-    raw_structure = []
-    image_data = {}
-    image_counter = 1
-    
-    # Créer un mapping des relations d'images
-    image_rels = {}
-    for rel_id, rel in doc.part.rels.items():
-        if "image" in rel.target_ref:
-            image_rels[rel_id] = rel
-    
-    # Parcourir le document dans l'ordre
-    for element in doc.element.body:
-        if isinstance(element, CT_P):
-            paragraph = Paragraph(element, doc)
-            
-            # Vérifier s'il y a une image
-            has_image = False
-            if paragraph._element.xpath('.//pic:pic'):
-                # Extraire le rId de l'image depuis le XML du paragraphe
-                para_xml = paragraph._element.xml
-                
-                # Chercher les références d'images
-                for match_pattern in ['r:embed="', 'r:link="']:
-                    if match_pattern in para_xml:
-                        start = para_xml.find(match_pattern) + len(match_pattern)
-                        end = para_xml.find('"', start)
-                        if start > len(match_pattern) - 1 and end > start:
-                            rel_id = para_xml[start:end]
-                            
-                            # Vérifier si c'est une vraie relation d'image
-                            if rel_id in image_rels:
-                                rel = image_rels[rel_id]
-                                image_ref_id = f"__IMAGE_{image_counter}__"
-                                
-                                try:
-                                    # Extraire les données de l'image
-                                    image_bytes = rel.target_part.blob
-                                    img = Image.open(BytesIO(image_bytes))
-                                    
-                                    image_data[image_ref_id] = {
-                                        'data': image_bytes,
-                                        'format': img.format or "PNG",
-                                        'width': img.width,
-                                        'height': img.height,
-                                        'position': len(raw_structure)  # Position dans la structure
-                                    }
-                                    
-                                    raw_structure.append({
-                                        'type': 'image',
-                                        'ref_id': image_ref_id
-                                    })
-                                    
-                                    image_counter += 1
-                                    has_image = True
-                                    break
-                                except Exception as e:
-                                    print(f"Erreur extraction image: {e}")
-                        
-                        if has_image:
-                            break
-            
-            # Traiter le texte s'il n'y a pas d'image ou après l'image
-            text = paragraph.text.strip()
-            if text and not has_image:
-                style_name = paragraph.style.name if paragraph.style else 'Normal'
-                
-                if 'Heading 1' in style_name or 'Title' in style_name:
-                    elem_type = 'h1'
-                elif 'Heading 2' in style_name:
-                    elem_type = 'h2'
-                elif 'Heading 3' in style_name:
-                    elem_type = 'h3'
-                elif 'Heading 4' in style_name:
-                    elem_type = 'h4'
-                elif 'Heading 5' in style_name:
-                    elem_type = 'h5'
-                elif 'Heading 6' in style_name:
-                    elem_type = 'h6'
-                else:
-                    elem_type = 'p'
-                
-                raw_structure.append({
-                    'type': elem_type,
-                    'content': text,
-                    'original_style': style_name
-                })
-    
-    if not raw_structure:
-        raise ValueError("Le document ne contient aucun contenu exploitable")
-    
-    return raw_structure, image_data
-
-
-def extract_images_to_folder(image_data: dict, output_folder: str, base_url: str = "") -> dict:
-    """
-    Extrait les images vers un dossier avec noms uniques
-    """
-    os.makedirs(output_folder, exist_ok=True)
-    image_urls = {}
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    for idx, (ref_id, img_info) in enumerate(image_data.items(), 1):
-        if 'data' in img_info:
-            ext = img_info.get('format', 'PNG').lower()
-            if ext == 'jpeg':
-                ext = 'jpg'
-            
-            filename = f"{timestamp}_{idx:03d}.{ext}"
-            filepath = os.path.join(output_folder, filename)
-            
-            with open(filepath, 'wb') as f:
-                f.write(img_info['data'])
-            
-            # Créer l'URL complète si une URL de base est fournie
-            if base_url:
-                image_urls[ref_id] = f"{base_url.rstrip('/')}/{filename}"
-            else:
-                image_urls[ref_id] = f"{filename}"
-    
-    return image_urls
-
-
-def build_elementor_json_fixed(semantic_structure: list, image_data: dict, image_urls: dict = None) -> dict:
-    """
-    Construit le JSON Elementor en conservant l'ordre des éléments
-    """
-    def generate_unique_id():
-        import random
-        import string
-        return ''.join(random.choices(string.ascii_lowercase + string.digits, k=7))
-    
-    elements_widgets = []
-    
-    for item in semantic_structure:
-        item_type = item.get('type')
-        
-        if item_type in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-            widget = {
-                "id": generate_unique_id(),
-                "elType": "widget",
-                "settings": {
-                    "title": item['content'],
-                    "header_size": item_type
-                },
-                "elements": [],
-                "widgetType": "heading"
-            }
-            elements_widgets.append(widget)
-            
-        elif item_type == 'p':
-            widget = {
-                "id": generate_unique_id(),
-                "elType": "widget",
-                "settings": {
-                    "editor": item['content']
-                },
-                "elements": [],
-                "widgetType": "text-editor"
-            }
-            elements_widgets.append(widget)
-            
-        elif item_type == 'image':
-            ref_id = item.get('ref_id')
-            image_url = "https://example.com/placeholder.jpg"
-            
-            if image_urls and ref_id in image_urls:
-                image_url = image_urls[ref_id]
-            
-            widget = {
-                "id": generate_unique_id(),
-                "elType": "widget",
-                "settings": {
-                    "image": {
-                        "url": image_url,
-                        "id": ""
-                    },
-                    "image_size": "full"
-                },
-                "elements": [],
-                "widgetType": "image"
-            }
-            
-            # Ajouter dimensions si disponibles
-            if image_data and ref_id in image_data:
-                img_info = image_data[ref_id]
-                if 'width' in img_info and 'height' in img_info:
-                    widget["settings"]["image"]["width"] = img_info['width']
-                    widget["settings"]["image"]["height"] = img_info['height']
-            
-            elements_widgets.append(widget)
-    
-    # Créer la structure Elementor
-    elementor_content = [
-        {
-            "id": generate_unique_id(),
-            "elType": "section",
-            "settings": {},
-            "elements": [
-                {
-                    "id": generate_unique_id(),
-                    "elType": "column",
-                    "settings": {
-                        "_column_size": 100,
-                        "_inline_size": None
-                    },
-                    "elements": elements_widgets
-                }
-            ]
-        }
-    ]
-    
-    return {
-        "version": "0.4",
-        "title": "Imported from Word - Fixed",
-        "type": "page",
-        "content": elementor_content
-    }
-
-
-# ============================================================================
-# CONFIGURATION STREAMLIT
-# ============================================================================
 
 st.set_page_config(
-    page_title="Word to Elementor Converter - FIXED",
+    page_title="Word to Elementor - Optimized",
     page_icon="📄",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# CSS personnalisé
 st.markdown("""
-    <style>
-    .main-header {
-        font-size: 3rem;
+<style>
+    .main-title {
+        font-size: 2.5rem;
         font-weight: bold;
-        color: #92400E;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .sub-header {
-        font-size: 1.2rem;
-        color: #666;
+        color: #1e40af;
         text-align: center;
         margin-bottom: 2rem;
     }
-    .stDownloadButton button {
-        background-color: #92400E;
+    .success-box {
+        padding: 1rem;
+        background-color: #10b981;
         color: white;
-        font-weight: bold;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
     }
-    </style>
+    .stDownloadButton button {
+        background-color: #1e40af;
+        color: white;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-# Initialisation session state
-if 'conversion_done' not in st.session_state:
-    st.session_state.conversion_done = False
-if 'json_output' not in st.session_state:
-    st.session_state.json_output = None
+# Session state
+if 'converted' not in st.session_state:
+    st.session_state.converted = False
+if 'json_data' not in st.session_state:
+    st.session_state.json_data = None
+if 'stats' not in st.session_state:
+    st.session_state.stats = {}
+if 'filename' not in st.session_state:
+    st.session_state.filename = ""
 
-# ============================================================================
-# SIDEBAR
-# ============================================================================
+def reset_conversion():
+    """Réinitialise la conversion pour un nouveau fichier"""
+    st.session_state.converted = False
+    st.session_state.json_data = None
+    st.session_state.stats = {}
+    st.session_state.filename = ""
 
+# Sidebar
 with st.sidebar:
     st.title("⚙️ Configuration")
     st.markdown("---")
     
-    st.subheader("🔗 URL de base WordPress")
-    base_media_url = st.text_input(
-        "URL de votre site WordPress",
+    base_url = st.text_input(
+        "URL base des médias",
         placeholder="https://votre-site.com/wp-content/uploads/2024/11",
-        help="URL où les images seront uploadées sur WordPress"
+        help="URL où seront uploadées les images sur WordPress"
     )
     
     st.markdown("---")
     
-    # Options de conversion
-    st.subheader("🎯 Options de conversion")
-    preserve_order = st.checkbox(
-        "Préserver l'ordre exact des éléments",
+    create_zip = st.checkbox(
+        "Créer package ZIP",
         value=True,
-        help="Conserve la position exacte des images et du texte"
+        help="Inclut JSON + dossier images"
     )
     
-    export_zip = st.checkbox(
-        "Exporter en package ZIP",
-        value=True,
-        help="Créer un ZIP avec JSON + dossier images"
-    )
-    
-    st.markdown("---")
-    
-    # Nettoyage du cache
-    if st.button("🗑️ Nettoyer le cache", type="secondary"):
-        outputs_dir = Path("outputs")
-        if outputs_dir.exists():
-            shutil.rmtree(outputs_dir)
-            outputs_dir.mkdir()
+    if st.button("🗑️ Nettoyer cache"):
+        if Path("outputs").exists():
+            shutil.rmtree("outputs")
+            Path("outputs").mkdir()
         st.success("✅ Cache nettoyé")
 
-# ============================================================================
-# INTERFACE PRINCIPALE
-# ============================================================================
+# Interface principale
+st.markdown('<div class="main-title">📄 Word to Elementor - Optimized</div>', unsafe_allow_html=True)
 
-st.markdown('<div class="main-header">📄 Word to Elementor Converter</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Version CORRIGÉE - Conserve la position exacte des images</div>', unsafe_allow_html=True)
+# Bouton reset si une conversion existe
+if st.session_state.converted:
+    col_reset1, col_reset2, col_reset3 = st.columns([1, 1, 1])
+    with col_reset2:
+        if st.button("🔄 Nouveau fichier", type="secondary", use_container_width=True):
+            reset_conversion()
+            st.rerun()
 
-st.markdown("---")
-
-# Upload du fichier
 uploaded_file = st.file_uploader(
     "📤 Sélectionnez un fichier .docx",
     type=['docx'],
-    help="Le document Word à convertir"
+    help="Document Word à convertir"
 )
 
 if uploaded_file:
+    # Stocker le nom du fichier
+    filename_base = Path(uploaded_file.name).stem
+    st.session_state.filename = filename_base
+    
     st.success(f"✅ Fichier chargé : **{uploaded_file.name}**")
     
-    if st.button("🚀 Convertir en JSON Elementor", type="primary"):
-        st.session_state.conversion_done = False
+    if st.button("🚀 Convertir", type="primary", use_container_width=True):
+        st.session_state.converted = False
+        
+        progress = st.progress(0)
+        status = st.empty()
         
         try:
-            # Créer un fichier temporaire
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
-                tmp_path = tmp_file.name
+            # Créer fichier temporaire
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
+                tmp.write(uploaded_file.getvalue())
+                tmp_path = tmp.name
             
-            # Progress bar
-            progress = st.progress(0)
-            status = st.empty()
-            
-            # Étape 1: Extraction du contenu
+            # Extraction
             status.text("📄 Extraction du document...")
-            progress.progress(30)
+            progress.progress(20)
             
-            raw_structure, image_data = parse_document_fixed(tmp_path)
+            structure, image_data = extract_document_structure(tmp_path)
             
-            status.text(f"✅ {len(raw_structure)} éléments extraits, {len(image_data)} images trouvées")
-            progress.progress(60)
+            status.text(f"✅ {len(structure)} éléments trouvés")
+            progress.progress(40)
             
-            # Étape 2: Extraction des images
+            # Sauvegarde images
             status.text("🖼️ Extraction des images...")
             outputs_dir = Path("outputs")
             outputs_dir.mkdir(exist_ok=True)
             images_dir = outputs_dir / "images"
             
-            image_urls = extract_images_to_folder(image_data, str(images_dir), base_media_url)
+            image_urls = save_images(image_data, str(images_dir), base_url)
+            progress.progress(60)
+            
+            # Construction JSON
+            status.text("🏗️ Génération du JSON Elementor...")
+            elementor_json = build_elementor_json(structure, image_data, image_urls)
             progress.progress(80)
             
-            # Étape 3: Construction du JSON
-            status.text("🏗️ Construction du JSON Elementor...")
-            elementor_json = build_elementor_json_fixed(raw_structure, image_data, image_urls)
-            
-            # Sauvegarder le JSON
+            # Sauvegarder JSON
             json_output = json.dumps(elementor_json, ensure_ascii=False, indent=2)
-            st.session_state.json_output = json_output
+            st.session_state.json_data = json_output
             
-            json_path = outputs_dir / f"{Path(uploaded_file.name).stem}_elementor.json"
+            json_filename = f"{st.session_state.filename}_elementor.json"
+            json_path = outputs_dir / json_filename
             with open(json_path, 'w', encoding='utf-8') as f:
                 f.write(json_output)
             
+            # Statistiques
+            h_count = sum(1 for item in structure if item['type'] in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            p_count = sum(1 for item in structure if item['type'] == 'p')
+            img_count = len(image_data)
+            
+            st.session_state.stats = {
+                'headings': h_count,
+                'paragraphs': p_count,
+                'images': img_count,
+                'total': len(structure)
+            }
+            
             progress.progress(100)
             status.text("✅ Conversion terminée!")
-            st.session_state.conversion_done = True
+            st.session_state.converted = True
             
-            # Nettoyer
             os.unlink(tmp_path)
             
         except Exception as e:
             st.error(f"❌ Erreur : {str(e)}")
-            if 'tmp_path' in locals():
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-# ============================================================================
-# RÉSULTATS
-# ============================================================================
-
-if st.session_state.conversion_done and st.session_state.json_output:
+# Résultats
+if st.session_state.converted and st.session_state.json_data:
     st.markdown("---")
-    st.markdown("### 🎉 Conversion réussie!")
     
-    col1, col2 = st.columns(2)
+    # Statistiques
+    stats = st.session_state.stats
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        # Télécharger le JSON
+        st.metric("📝 Titres", stats['headings'])
+    with col2:
+        st.metric("📄 Paragraphes", stats['paragraphs'])
+    with col3:
+        st.metric("🖼️ Images", stats['images'])
+    with col4:
+        st.metric("📊 Total", stats['total'])
+    
+    st.markdown("---")
+    
+    # Téléchargements
+    col_a, col_b = st.columns(2)
+    
+    with col_a:
         st.download_button(
-            label="⬇️ Télécharger le JSON",
-            data=st.session_state.json_output,
-            file_name=f"{Path(uploaded_file.name).stem}_elementor.json",
-            mime="application/json"
+            label="📥 Télécharger JSON",
+            data=st.session_state.json_data,
+            file_name=f"{st.session_state.filename}_elementor.json",
+            mime="application/json",
+            use_container_width=True
         )
     
-    with col2:
-        # Créer et télécharger le ZIP
-        if export_zip:
+    with col_b:
+        if create_zip:
             outputs_dir = Path("outputs")
             zip_buffer = BytesIO()
             
             with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                # Ajouter le JSON
-                json_path = outputs_dir / f"{Path(uploaded_file.name).stem}_elementor.json"
+                # JSON
+                json_path = outputs_dir / f"{st.session_state.filename}_elementor.json"
                 if json_path.exists():
                     zf.write(json_path, json_path.name)
                 
-                # Ajouter les images
+                # Images
                 images_dir = outputs_dir / "images"
                 if images_dir.exists():
                     for img_file in images_dir.glob("*"):
                         zf.write(img_file, f"images/{img_file.name}")
             
             st.download_button(
-                label="📦 Télécharger le package ZIP",
+                label="📦 Télécharger ZIP",
                 data=zip_buffer.getvalue(),
-                file_name=f"{Path(uploaded_file.name).stem}_package.zip",
-                mime="application/zip"
+                file_name=f"{st.session_state.filename}_package.zip",
+                mime="application/zip",
+                use_container_width=True
             )
     
-    # Aperçu du JSON
-    with st.expander("👀 Aperçu du JSON généré"):
-        st.code(st.session_state.json_output[:2000] + "...", language='json')
+    # Aperçu
+    with st.expander("👀 Aperçu JSON"):
+        preview = st.session_state.json_data[:1500]
+        st.code(preview + "\n...", language='json')
     
-    st.info("💡 **Astuce :** Uploadez les images du dossier 'images' dans votre médiathèque WordPress, puis importez le JSON dans Elementor.")
+    st.info("💡 Uploadez les images dans WordPress, puis importez le JSON dans Elementor")
