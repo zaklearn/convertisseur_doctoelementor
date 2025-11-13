@@ -76,6 +76,27 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # Layout colonnes
+    st.subheader("📐 Layout de l'article")
+    num_columns = st.radio(
+        "Nombre de colonnes",
+        options=[1, 2, 3],
+        index=0,
+        help="Distribution du contenu en colonnes"
+    )
+    
+    if num_columns > 1:
+        distribution_strategy = st.selectbox(
+            "Stratégie de distribution",
+            options=["auto", "sequential", "balanced"],
+            index=0,
+            help="Comment répartir le contenu entre colonnes"
+        )
+    else:
+        distribution_strategy = "auto"
+    
+    st.markdown("---")
+    
     create_zip = st.checkbox(
         "Créer package ZIP",
         value=True,
@@ -144,7 +165,13 @@ if uploaded_file:
             
             # Construction JSON
             status.text("🏗️ Génération du JSON Elementor...")
-            elementor_json = build_elementor_json(structure, image_data, image_urls)
+            elementor_json = build_elementor_json(
+                structure, 
+                image_data, 
+                image_urls,
+                num_columns=num_columns,
+                distribution_strategy=distribution_strategy
+            )
             progress.progress(80)
             
             # Sauvegarder JSON
@@ -160,12 +187,16 @@ if uploaded_file:
             h_count = sum(1 for item in structure if item['type'] in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
             p_count = sum(1 for item in structure if item['type'] == 'p')
             img_count = len(image_data)
+            tbl_count = sum(1 for item in structure if item['type'] == 'table')
             
             st.session_state.stats = {
                 'headings': h_count,
                 'paragraphs': p_count,
                 'images': img_count,
-                'total': len(structure)
+                'tables': tbl_count,
+                'total': len(structure),
+                'layout': f"{num_columns} colonne{'s' if num_columns > 1 else ''}",
+                'strategy': distribution_strategy if num_columns > 1 else 'N/A'
             }
             
             progress.progress(100)
@@ -185,7 +216,7 @@ if st.session_state.converted and st.session_state.json_data:
     
     # Statistiques
     stats = st.session_state.stats
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     with col1:
         st.metric("📝 Titres", stats['headings'])
@@ -194,7 +225,14 @@ if st.session_state.converted and st.session_state.json_data:
     with col3:
         st.metric("🖼️ Images", stats['images'])
     with col4:
-        st.metric("📊 Total", stats['total'])
+        st.metric("📊 Tableaux", stats['tables'])
+    with col5:
+        st.metric("📈 Total", stats['total'])
+    with col6:
+        st.metric("📐 Layout", stats['layout'])
+    
+    if stats.get('strategy') != 'N/A':
+        st.info(f"💡 Stratégie de distribution : **{stats['strategy']}**")
     
     st.markdown("---")
     

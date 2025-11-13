@@ -9,7 +9,9 @@ from io import BytesIO
 from PIL import Image
 from docx import Document
 from docx.oxml.text.paragraph import CT_P
+from docx.oxml.table import CT_Tbl
 from docx.text.paragraph import Paragraph
+from docx.table import Table
 
 
 def detect_heading_level(text: str, style_name: str) -> str:
@@ -55,6 +57,36 @@ def detect_heading_level(text: str, style_name: str) -> str:
     return 'p'
 
 
+def extract_table_data(table: Table) -> Dict[str, Any]:
+    """
+    Extrait les données d'un tableau Word
+    Retourne structure compatible Elementor
+    """
+    rows_data = []
+    
+    for row in table.rows:
+        cells_data = []
+        for cell in row.cells:
+            cell_text = cell.text.strip()
+            cells_data.append(cell_text)
+        rows_data.append(cells_data)
+    
+    # Détecter si première ligne est un header
+    has_header = False
+    if len(rows_data) > 1:
+        # Heuristique : si première ligne a texte court et ligne suivante plus longue
+        first_row_avg = sum(len(cell) for cell in rows_data[0]) / len(rows_data[0]) if rows_data[0] else 0
+        second_row_avg = sum(len(cell) for cell in rows_data[1]) / len(rows_data[1]) if rows_data[1] else 0
+        has_header = first_row_avg > 0 and first_row_avg < second_row_avg * 1.5
+    
+    return {
+        'rows': rows_data,
+        'num_rows': len(rows_data),
+        'num_cols': len(rows_data[0]) if rows_data else 0,
+        'has_header': has_header
+    }
+
+
 def extract_document_structure(docx_path: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Extrait la structure complète du document avec détection intelligente
@@ -73,7 +105,18 @@ def extract_document_structure(docx_path: str) -> Tuple[List[Dict[str, Any]], Di
     
     # Parcourir le document dans l'ordre exact
     for element in doc.element.body:
-        if isinstance(element, CT_P):
+        # Traiter les tableaux
+        if isinstance(element, CT_Tbl):
+            table = Table(element, doc)
+            table_data = extract_table_data(table)
+            
+            structure.append({
+                'type': 'table',
+                'data': table_data
+            })
+        
+        # Traiter les paragraphes
+        elif isinstance(element, CT_P):
             para = Paragraph(element, doc)
             
             # Vérifier présence d'image
